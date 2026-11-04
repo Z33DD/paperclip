@@ -74,6 +74,8 @@ import {
   reconcileRetainedNativeSessionCleanup,
 } from "../native-runtime/index.js";
 import { runningProcesses } from "../../adapters/index.js";
+import { serverShutdownAbortReason } from "@paperclipai/adapter-utils";
+import { readRemoteRunDetachedEvidence, remoteRunDetachedEvidence } from "./remote-run-reattach.js";
 import { parseObject } from "../../adapters/utils.js";
 import {
   isNativeRunnerOwnershipHeld,
@@ -421,7 +423,12 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
     // transient retries; process loss must not open a second retry budget.
     if (run.runtimeMode === "native" || await legacyExecutionNeedsReconciliationWithEvidence(db, run))
       return null;
-    const scheduled = await scheduleBoundedRetryForRun(run, agent, { now });
+    // A detached remote run is still working: reattach before its event
+    // backlog expires instead of waiting out a transient-failure backoff.
+    const scheduled = await scheduleBoundedRetryForRun(run, agent, {
+      now,
+      ...(readRemoteRunDetachedEvidence(run.resultJson) ? { delayMs: 0 } : {}),
+    });
     return scheduled.outcome === "scheduled" ? scheduled.run : null;
   }
 
@@ -1258,6 +1265,10 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
               parseObject(current?.resultJson),
             )
           : parseObject(run.resultJson);
+      // The adapter leaves a reattachable remote run going on shutdown; record
+      // that evidence so the successor follows it instead of a board hold.
+      const remoteDetached = control ? remoteRunDetachedEvidence(agent.adapterType, run) : null;
+      if (remoteDetached) persistedCancellationResult.executionRecovery = remoteDetached;
 
       const interruptedStatus = await setRunStatusIfRunning(
         run.id,
@@ -1340,7 +1351,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         return;
       }
       const stopRenewing = maintainLegacyShutdownWorkspaceSettlement(db, run);
-      control.controller.abort(new Error(message));
+      control.controller.abort(serverShutdownAbortReason(message));
       const settlement = finishInterruptedRun().finally(stopRenewing);
       const tracked = settlement.catch(() => {
         logger.warn({ runId: run.id, errorKind: "shutdown_settlement_failed" }, "Shutdown workspace settlement failed; durable cleanup protection remains in place");
@@ -2526,12 +2537,18 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         run.controllerBootId !== legacyControllerBootId &&
         !revokedState.processPid &&
         !revokedState.processGroupId;
+      // A remote provider run outlives this server: its successor reattaches
+      // to the recorded run instead of replaying the task.
+      const remoteDetached = run.runtimeMode === "legacy" && !restartInterruptedBeforeDispatch
+        ? remoteRunDetachedEvidence(adapterType, run)
+        : null;
       const shouldRetry =
         !await pendingCaseHandoffForRun(db, run.id, run.companyId) &&
         (run.processLossRetryCount ?? 0) < 1 &&
         ((tracksLegacyLocalChild &&
           (!!run.processPid || !!run.processGroupId)) ||
           restartInterruptedBeforeDispatch ||
+          remoteDetached !== null ||
           monitorDispatchLostWithoutFutureWake);
       const baseMessage = buildProcessLossMessage(run);
       const processLossDiagnostic = buildProcessLossDiagnostic({
@@ -2562,7 +2579,9 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
                   processLossDiagnostic,
                   ...(restartInterruptedBeforeDispatch
                     ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } }
-                    : {}),
+                    : remoteDetached
+                      ? { executionRecovery: remoteDetached }
+                      : {}),
                 },
                 errorCode: "process_lost",
                 errorMessage: shouldRetry

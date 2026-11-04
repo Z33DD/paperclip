@@ -1,4 +1,5 @@
 import { notifyAttentionRetentionWork } from "../retention-work-notifications.js";
+import { applyRemoteRunReattachContext } from "./remote-run-reattach.js";
 import { normalizeAgentNameKey } from "../agent-name-key.js";
 import { notifyStatusCardIssueChange } from "../status-card-notifications.js";
 import { notifyScheduledRetryDispatch } from "../run-dispatch-notifications.js";
@@ -680,6 +681,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       },
       "normal_model",
     );
+    applyRemoteRunReattachContext(retryContextSnapshot, run);
     // A successor resolves current assignments; the failed run retains its snapshot.
     delete retryContextSnapshot.skillVersions;
     delete retryContextSnapshot.skillSelectionSnapshot;

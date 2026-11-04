@@ -608,6 +608,36 @@ export async function persistHeartbeatRunProcessMetadata(
   });
 }
 
+/**
+ * Record the provider's run id for a legacy run that executes on a remote
+ * service, so recovery can reattach to that run after this server stops.
+ * Only a still-running legacy run accepts it; the first id wins.
+ */
+export async function persistHeartbeatRunExternalRunId(db: Db, runId: string, externalRunId: string) {
+  const id = externalRunId.trim();
+  if (!id) return null;
+  return db.transaction(async tx => {
+    const run = await tx
+      .update(heartbeatRuns)
+      .set({ externalRunId: id, updatedAt: new Date() })
+      .where(and(
+        eq(heartbeatRuns.id, runId),
+        eq(heartbeatRuns.status, "running"),
+        eq(heartbeatRuns.runtimeMode, "legacy"),
+        or(isNull(heartbeatRuns.externalRunId), eq(heartbeatRuns.externalRunId, id)),
+      ))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (run) await appendHeartbeatRunEvent(tx as unknown as Db, {
+      companyId: run.companyId, runId, agentId: run.agentId,
+      eventType: "lifecycle", stream: "system", level: "info",
+      message: "Remote provider run recorded",
+      payload: { externalRunId: id },
+    });
+    return run;
+  });
+}
+
 type SkillTestHeartbeatCompletion = {
   outcome: "failed" | "cancelled";
   error: string | null;

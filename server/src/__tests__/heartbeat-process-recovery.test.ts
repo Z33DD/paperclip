@@ -3554,6 +3554,54 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     ]);
   });
 
+  it("reattaches to a remote Hermes run that outlived the server instead of holding the issue", async () => {
+    const { companyId, runId, issueId, agentId } = await seedRestartOrphanedLegacySetup("dispatching");
+    await db.update(agents).set({ adapterType: "hermes_gateway" }).where(eq(agents.id, agentId));
+    await db.update(heartbeatRuns).set({ externalRunId: "run_hermes_live" }).where(eq(heartbeatRuns.id, runId));
+
+    const heartbeat = heartbeatService(db);
+    await heartbeat.reapOrphanedRuns();
+
+    const [reaped] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(reaped).toMatchObject({
+      status: "failed",
+      errorCode: "process_lost",
+      error: "Process lost -- server may have restarted; retrying once",
+    });
+    expect(reaped?.resultJson).toMatchObject({
+      executionRecovery: { kind: "remote_detached", externalRunId: "run_hermes_live", providerWorkStarted: true },
+    });
+    const retries = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.retryOfRunId, runId),
+    ));
+    expect(retries).toHaveLength(1);
+    expect(retries[0]?.contextSnapshot).toMatchObject({
+      remoteRunReattach: { externalRunId: "run_hermes_live", sourceRunId: runId },
+    });
+    expect(await db.select().from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))).toEqual([]);
+  });
+
+  it("still holds a Hermes run for reconciliation when it never recorded its remote run", async () => {
+    const { companyId, runId, issueId, agentId } = await seedRestartOrphanedLegacySetup("dispatching");
+    await db.update(agents).set({ adapterType: "hermes_gateway" }).where(eq(agents.id, agentId));
+
+    const heartbeat = heartbeatService(db);
+    await heartbeat.reapOrphanedRuns();
+
+    const [reaped] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(reaped?.resultJson).not.toHaveProperty("executionRecovery");
+    expect(await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.retryOfRunId, runId),
+    ))).toEqual([]);
+    expect(await db.select().from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))).toEqual([
+      expect.objectContaining({ cause: "legacy_execution_requires_reconciliation" }),
+    ]);
+  });
+
   async function withTempPaperclipHome<T>(
     fn: (home: string) => Promise<T>,
   ): Promise<T> {

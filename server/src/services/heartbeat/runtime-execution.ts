@@ -11,7 +11,7 @@ import { inspectPluginWorkspaceForFinalization } from "../native-runtime/native-
 import { AsyncLocalStorage } from "node:async_hooks";
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { parseNativeSessionGoalControl } from "./scheduling.js";
-import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
+import { isHeartbeatRunTerminalStatus, persistHeartbeatRunExternalRunId } from "./run-lifecycle.js";
 import {
   PAPERCLIP_WAKE_PAYLOAD_KEY,
   configuredPaperclipApiBaseUrl,
@@ -919,6 +919,10 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
                       : null,
                   startedAt: meta.startedAt,
                 });
+              },
+              onExternalRun: async (meta) => {
+                // Recovery reattaches to this remote run if the server stops.
+                await persistHeartbeatRunExternalRunId(db, run.id, meta.externalRunId);
               },
               authToken: authToken ?? undefined,
             }));
