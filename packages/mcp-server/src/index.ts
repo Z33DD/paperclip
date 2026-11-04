@@ -1,8 +1,18 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 import { PaperclipApiClient } from "./client.js";
 import { readConfigFromEnv, type PaperclipMcpConfig } from "./config.js";
 import { createToolDefinitions } from "./tools.js";
+
+// Every tool also takes the caller's run id, for servers that outlive one heartbeat (an agent
+// runtime that keeps one MCP process per agent). Paperclip requires it on an agent's writes.
+const PAPERCLIP_RUN_ID_ARG = z
+  .string()
+  .optional()
+  .describe(
+    "Your current Paperclip run id (the Run ID in your wake prompt). Needed on writes when this server was started without PAPERCLIP_RUN_ID.",
+  );
 
 export function createPaperclipMcpServer(config: PaperclipMcpConfig = readConfigFromEnv()) {
   const server = new McpServer({
@@ -13,7 +23,10 @@ export function createPaperclipMcpServer(config: PaperclipMcpConfig = readConfig
   const client = new PaperclipApiClient(config);
   const tools = createToolDefinitions(client);
   for (const tool of tools) {
-    server.tool(tool.name, tool.description, tool.schema.shape, tool.execute);
+    const shape = { ...tool.schema.shape, paperclipRunId: PAPERCLIP_RUN_ID_ARG };
+    server.tool(tool.name, tool.description, shape, ({ paperclipRunId, ...input }) =>
+      client.withRunId(paperclipRunId, () => tool.execute(input)),
+    );
   }
 
   return {
