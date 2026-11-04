@@ -1,4 +1,5 @@
 import { deriveTaskKeyWithHeartbeatFallback } from "./run-state.js";
+import { applyRemoteRunReattachContext } from "./remote-run-reattach.js";
 import {
   WORKSPACE_VALIDATION_FAILURE_CODE,
   isWorkspaceValidationFailedRun,
@@ -660,6 +661,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       },
       "normal_model",
     );
+    applyRemoteRunReattachContext(retryContextSnapshot, run);
     const responsibleUserId = await resolveResponsibleUserIdForRunContext(
       run,
       retryContextSnapshot,

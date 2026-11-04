@@ -23,7 +23,7 @@ SSE) hits the same walls on day one:
    stock MCP server reads it once at startup, which is wrong for a long-lived gateway
    (see paperclipai/paperclip#16636), so operators patch it per call.
 
-## Phase 1: transcript (this change)
+## Phase 1: transcript (done)
 
 - `gateway/server/execute.ts`: Hermes tool events have no call id, so the adapter pairs
   `tool.started` with the next `tool.completed`/`tool.failed` of the same tool (FIFO, which
@@ -47,15 +47,40 @@ SSE) hits the same walls on day one:
 - `KNOWN_DEFAULTS` capability entries for both Hermes adapters, so the first render
   doesn't fall back to all-false.
 
-## Phase 3: survive Paperclip restarts
+## Phase 3: survive Paperclip restarts (done)
 
-- Persist `hermesRunId` as soon as the run is created. The session codec already carries it.
-- On boot recovery, for `hermes_gateway` runs that are still `running`, ask
-  `GET /v1/runs/{id}`. If the run is still live, reattach to `/v1/runs/{id}/events`. The
-  Hermes backlog keeps 1,000 events, so replay from the last logged `seq`. If it's terminal,
-  settle it with the real result. Never mark it `process_lost` while Hermes says it's
-  running.
-- Add `hermes_gateway` to the continuation/retry sets where a remote run can be proven alive.
+Before this change, a restart either waited on a gateway run that ignored the abort
+signal, or reaped the run as `process_lost` with no evidence. Recovery then put a board
+hold on the issue (`legacy_execution_requires_reconciliation`), while Hermes finished
+the work unseen.
+
+- **Contract** (`adapter-utils/remote-run-reattach.ts`):
+  - `onExternalRun` lets a remote adapter report its provider run id.
+  - `supportsRemoteRunReattach` marks an adapter whose `execute()` can follow
+    `context.remoteRunReattach` instead of starting work.
+  - `executionRecovery.kind = "remote_detached"` is the evidence recovery records.
+  - `serverShutdownAbortReason` tells a shutdown apart from an operator Stop.
+- **Hermes gateway adapter:**
+  - Reports the Hermes run id right after `POST /v1/runs`; the host persists it as
+    `heartbeat_runs.external_run_id`.
+  - Now honours the run signal:
+    - **Operator Stop:** `POST /stop`. It claims `interrupted`/`providerStopped` only
+      when Hermes confirms a terminal status.
+    - **Server shutdown:** leaves the Hermes run going and returns `remote_detached`.
+  - **Reattach:** with `context.remoteRunReattach`, it skips the create, checks
+    `GET /v1/runs/{id}` (404 → `hermes_gateway_reattach_not_found`), then consumes the
+    event backlog.
+  - Event streams resume with `Last-Event-ID`, and replayed `seq`s are dropped, so a
+    reconnect no longer duplicates output.
+- **Recovery:** both the graceful-shutdown path and the orphan sweep record `remote_detached`
+  when the adapter supports reattach and the run has an external id.
+  - `legacyExecutionNeedsReconciliation` exempts that evidence, still inside the
+    two-attempt bound.
+  - The process-loss retry is scheduled at once (`delayMs: 0`), because Hermes keeps
+    the stream backlog for about 5 minutes and the final status for 1 hour.
+  - `scheduleBoundedRetryForRun` puts `remoteRunReattach` on the successor and strips it
+    from any other successor.
+  - A run with no recorded external id is held as before.
 
 ## Phase 4: Paperclip tools without operator wiring
 

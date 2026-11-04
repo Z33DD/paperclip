@@ -46,6 +46,14 @@ export type {
   CLIAdapterModule,
   CreateConfigValues,
 } from "./types.js";
+export type { RemoteRunDetachedRecovery, RemoteRunReattachContext } from "./remote-run-reattach.js";
+export {
+  REMOTE_RUN_REATTACH_CONTEXT_KEY,
+  SERVER_SHUTDOWN_ABORT_NAME,
+  isServerShutdownAbort,
+  readRemoteRunReattachContext,
+  serverShutdownAbortReason,
+} from "./remote-run-reattach.js";
 export type {
   SessionCompactionPolicy,
   NativeContextManagement,

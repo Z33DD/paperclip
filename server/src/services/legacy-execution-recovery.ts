@@ -51,6 +51,10 @@ export function legacyExecutionNeedsReconciliation(
   if ((run.errorCode === "workspace_git_scan_timeout" || run.errorCode === "workspace_git_scan_saturated") &&
       evidence?.kind === "bootstrap" && evidence.providerWorkStarted === false) return false;
   if (executionFailureRetryCount(run) >= 2) return true;
+  // The provider run continues remotely and the successor only observes it,
+  // so no recorded action can replay.
+  if (evidence?.kind === "remote_detached" && evidence.providerWorkStarted === true &&
+      typeof evidence.externalRunId === "string" && evidence.externalRunId.trim()) return false;
   return !(
     evidence?.kind === "bootstrap" && evidence.providerWorkStarted === false
   );
