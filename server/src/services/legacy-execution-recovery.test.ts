@@ -107,3 +107,20 @@ it("recognizes only an unclaimed pre-dispatch review wait receipt", () => {
     { resultJson: { ...run.resultJson, workspaceRestoreFailure: "restore_unsafe_archive" } },
   ]) expect(isPreDispatchReviewWait({ ...run, ...patch })).toBe(false);
 });
+
+it("lets a detached remote run be followed without reconciling, within the retry bound", () => {
+  const detached = {
+    runtimeMode: "legacy", status: "failed", errorCode: "process_lost",
+    resultJson: { executionRecovery: { kind: "remote_detached", externalRunId: "run_hermes_1", providerWorkStarted: true } },
+  };
+  expect(legacyExecutionNeedsReconciliation(detached)).toBe(false);
+  expect(legacyExecutionNeedsReconciliation({ ...detached, status: "interrupted", errorCode: "server_shutdown_interrupted" })).toBe(false);
+  // Evidence must name the remote run; anything less keeps the outcome unknown.
+  expect(legacyExecutionNeedsReconciliation({ ...detached, resultJson: {
+    executionRecovery: { kind: "remote_detached", externalRunId: " ", providerWorkStarted: true },
+  } })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...detached, resultJson: {
+    executionRecovery: { kind: "remote_detached", providerWorkStarted: true },
+  } })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...detached, scheduledRetryAttempt: 2 })).toBe(true);
+});

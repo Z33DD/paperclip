@@ -1,3 +1,5 @@
+import type { RemoteRunDetachedRecovery } from "./remote-run-reattach.js";
+
 // ---------------------------------------------------------------------------
 // Minimal adapter-facing interfaces (no drizzle dependency)
 // ---------------------------------------------------------------------------
@@ -106,7 +108,7 @@ export interface AdapterExecutionResult {
     providerStopped: true;
     sessionPreserved: true;
     actionOutcomes: "settled";
-  };
+  } | RemoteRunDetachedRecovery;
   exitCode: number | null;
   signal: string | null;
   timedOut: boolean;
@@ -284,6 +286,11 @@ export interface AdapterExecutionContext {
    */
   onDispatch?: () => void;
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
+  /**
+   * Remote-run adapters report the provider's run id as soon as it exists, so
+   * the host can find that run again after it loses this process.
+   */
+  onExternalRun?: (meta: { externalRunId: string }) => Promise<void>;
   authToken?: string;
   /**
    * The injected OpenTelemetry startup trace context (tracer + root
@@ -519,6 +526,13 @@ export interface ServerAdapterModule {
   supportsLocalAgentJwt?: boolean;
   /** How this adapter receives Paperclip's run-scoped control tools. */
   runtimeToolDelivery?: AdapterRuntimeToolDelivery;
+  /**
+   * execute() can follow an existing remote run named by
+   * `context.remoteRunReattach` instead of starting one, and it reports
+   * `onExternalRun` before provider work can begin. Recovery then reattaches
+   * after a server shutdown or crash rather than holding the run.
+   */
+  supportsRemoteRunReattach?: boolean;
   models?: AdapterModel[];
   listModels?: () => Promise<AdapterModel[]>;
   /**
