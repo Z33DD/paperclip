@@ -98,3 +98,39 @@ describe("parseHermesGatewayStdoutLine — regression guards for unrelated handl
     expect(result[0]).toEqual({ kind: "stdout", ts: TS, text: "just a plain line of output" });
   });
 });
+
+describe("parseHermesGatewayStdoutLine — tool, interim, subagent and completion events", () => {
+  it("renders tool.started as a tool call keyed by the adapter's pairing id", () => {
+    expect(parseHermesGatewayStdoutLine(
+      eventLine("tool.started", { tool: "terminal", preview: "ls -la", seq: 4, paperclip_tool_use_id: "run-123:tool:1" }),
+      TS,
+    )).toEqual([{ kind: "tool_call", ts: TS, name: "terminal", input: { preview: "ls -la" }, toolUseId: "run-123:tool:1" }]);
+  });
+
+  it("renders tool.completed as a tool result with the same id and its error flag", () => {
+    expect(parseHermesGatewayStdoutLine(
+      eventLine("tool.completed", { tool: "terminal", duration: 0.3, error: true, preview: "Traceback", paperclip_tool_use_id: "run-123:tool:1" }),
+      TS,
+    )).toEqual([{ kind: "tool_result", ts: TS, toolUseId: "run-123:tool:1", toolName: "terminal", content: "Traceback", isError: true }]);
+  });
+
+  it("still renders tool events from logs written before the adapter paired them", () => {
+    const [call] = parseHermesGatewayStdoutLine(eventLine("tool.started", { tool: "patch", preview: null, seq: 7 }), TS);
+    expect(call).toEqual({ kind: "tool_call", ts: TS, name: "patch", input: {}, toolUseId: "run-123:patch:7" });
+    const [result] = parseHermesGatewayStdoutLine(eventLine("tool.completed", { tool: "patch", duration: 1.25, error: false, preview: "" }), TS);
+    expect(result).toMatchObject({ kind: "tool_result", toolName: "patch", content: "Finished in 1.3s", isError: false });
+  });
+
+  it("drops message.interim when the text was already streamed as deltas", () => {
+    expect(parseHermesGatewayStdoutLine(eventLine("message.interim", { text: "Recap", already_streamed: true }), TS)).toEqual([]);
+    expect(parseHermesGatewayStdoutLine(eventLine("message.interim", { text: "Checking the list." }), TS))
+      .toEqual([{ kind: "assistant", ts: TS, text: "Checking the list.", channel: "progress" }]);
+  });
+
+  it("summarizes subagent lifecycle events", () => {
+    expect(parseHermesGatewayStdoutLine(eventLine("subagent.start", { goal: "Score 20 leads" }), TS))
+      .toEqual([{ kind: "system", ts: TS, text: "Subagent started: Score 20 leads" }]);
+    expect(parseHermesGatewayStdoutLine(eventLine("subagent.complete", { status: "completed", summary: "20 scored" }), TS))
+      .toEqual([{ kind: "system", ts: TS, text: "Subagent completed: 20 scored" }]);
+  });
+});

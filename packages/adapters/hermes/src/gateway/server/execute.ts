@@ -55,6 +55,9 @@ type ExecutionState = {
   runId: string;
   outputChunks: string[];
   lastEventName: string | null;
+  /** Open tool calls per tool name, oldest first (Hermes tool events carry no call id). */
+  openToolCalls: Map<string, string[]>;
+  toolCallCount: number;
   terminal: TerminalState | null;
   resolveTerminal: (state: TerminalState) => void;
   terminalPromise: Promise<TerminalState>;
@@ -524,6 +527,8 @@ function createExecutionState(runId: string): ExecutionState {
     runId,
     outputChunks: [],
     lastEventName: null,
+    openToolCalls: new Map(),
+    toolCallCount: 0,
     terminal: null,
     resolveTerminal,
     terminalPromise,
@@ -555,15 +560,49 @@ function extractOutput(value: unknown): string | null {
   return nested ? extractOutput(nested) : null;
 }
 
+export const TOOL_USE_ID_FIELD = "paperclip_tool_use_id";
+
+/**
+ * Hermes run events report tool.started / tool.completed without a call id.
+ * Pair them here (FIFO per tool name, which matches Hermes' sequential tool
+ * executor) and stamp the pair with a stable id, so the transcript can render
+ * one tool card per call instead of two anonymous system lines.
+ */
+function annotateToolEvent(state: ExecutionState, eventName: string | null, parsed: unknown): unknown {
+  if (eventName !== "tool.started" && eventName !== "tool.completed" && eventName !== "tool.failed") return parsed;
+  const record = asRecord(parsed);
+  if (!record) return parsed;
+  const upstreamId = nonEmpty(record.tool_call_id) ?? nonEmpty(record.toolCallId) ?? nonEmpty(record.call_id);
+  if (upstreamId) return { ...record, [TOOL_USE_ID_FIELD]: upstreamId };
+  const toolName = nonEmpty(record.tool) ?? nonEmpty(record.name) ?? "tool";
+  const open = state.openToolCalls.get(toolName) ?? [];
+  let id: string | undefined;
+  if (eventName === "tool.started") {
+    state.toolCallCount += 1;
+    id = `${state.runId}:tool:${state.toolCallCount}`;
+    open.push(id);
+  } else {
+    id = open.shift();
+    if (!id) {
+      state.toolCallCount += 1;
+      id = `${state.runId}:tool:${state.toolCallCount}`;
+    }
+  }
+  if (open.length > 0) state.openToolCalls.set(toolName, open);
+  else state.openToolCalls.delete(toolName);
+  return { ...record, [TOOL_USE_ID_FIELD]: id };
+}
+
 async function handleEvent(
   ctx: AdapterExecutionContext,
   state: ExecutionState,
   frame: SseFrame,
   redactText: TextRedactor = sanitizeSensitiveText,
 ): Promise<void> {
-  const parsed = parseJsonData(frame.data);
+  const rawParsed = parseJsonData(frame.data);
+  const eventName = eventNameFromData(rawParsed, frame.event);
+  const parsed = annotateToolEvent(state, eventName, rawParsed);
   const record = asRecord(parsed);
-  const eventName = eventNameFromData(parsed, frame.event);
   state.lastEventName = eventName;
   const delta = asString(record?.delta, "") || asString(record?.text_delta, "");
   const sanitizedDelta = eventName === "message.delta" && delta ? redactText(delta) : null;
