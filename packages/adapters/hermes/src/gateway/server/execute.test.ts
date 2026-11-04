@@ -4,6 +4,7 @@ import { createPromptContextFixture } from "@paperclipai/adapter-utils/test-fixt
 import { execute, mapFinalResultForTest, parseSseFramesForTest, resolveSessionKey } from "./execute.js";
 import { testEnvironment } from "./test.js";
 import { parseHermesGatewayStdoutLine } from "../ui/parse-stdout.js";
+import { serverShutdownAbortReason } from "@paperclipai/adapter-utils/remote-run-reattach";
 
 function makeCtx(config: Record<string, unknown>): AdapterExecutionContext {
   return {
@@ -1193,5 +1194,159 @@ describe("mapFinalResultForTest", () => {
     expect(result.exitCode).toBe(1);
     expect(result.errorCode).toBe("hermes_gateway_run_failed");
     expect(result.errorMessage).toBe("boom");
+  });
+});
+
+describe("execute — remote run ownership", () => {
+  const config = { apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key", timeoutSec: 5, pollIntervalMs: 250 };
+
+  function completedStream(output: string) {
+    return sseStream([
+      "event: message.delta", `data: ${JSON.stringify({ event: "message.delta", delta: output, seq: 0 })}`, "",
+      "event: run.completed", `data: ${JSON.stringify({ event: "run.completed", status: "completed", output, seq: 1 })}`, "",
+    ].join("\n"));
+  }
+
+  /** An SSE body that stays open until the request is aborted. */
+  function hangingStream(signal: AbortSignal | null | undefined): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(": open\n\n"));
+        signal?.addEventListener("abort", () => controller.error(new Error("aborted")), { once: true });
+      },
+    });
+  }
+
+  it("records the Hermes run id as soon as the run is created", async () => {
+    const ctx = makeCtx(config);
+    const onExternalRun = vi.fn(async () => undefined);
+    ctx.onExternalRun = onExternalRun;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-hermes-1" }), { status: 200 });
+      if (url.endsWith("/events")) return new Response(completedStream("done"), { status: 200 });
+      return new Response(JSON.stringify({ status: "completed" }), { status: 200 });
+    }));
+
+    const result = await execute(ctx);
+    expect(result.exitCode).toBe(0);
+    expect(onExternalRun).toHaveBeenCalledWith({ externalRunId: "run-hermes-1" });
+  });
+
+  it("reattaches to the named Hermes run without creating a new one", async () => {
+    const ctx = makeCtx(config);
+    ctx.context = { ...ctx.context, remoteRunReattach: { externalRunId: "run-hermes-1", sourceRunId: "pc-run-0" } };
+    const onExternalRun = vi.fn(async () => undefined);
+    ctx.onExternalRun = onExternalRun;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) throw new Error("must not create a run");
+      if (url.endsWith("/events")) return new Response(completedStream("finished while Paperclip was away"), { status: 200 });
+      if (url.endsWith("/v1/runs/run-hermes-1") && (init?.method ?? "GET") === "GET") {
+        return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "running" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ status: "completed" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(ctx);
+    expect(result.exitCode).toBe(0);
+    expect(result.resultJson?.output).toBe("finished while Paperclip was away");
+    expect(result.sessionParams).toMatchObject({ hermesRunId: "run-hermes-1" });
+    expect(onExternalRun).toHaveBeenCalledWith({ externalRunId: "run-hermes-1" });
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith("/v1/runs") && init?.method === "POST")).toBe(false);
+  });
+
+  it("fails clearly when Hermes no longer knows the run to reattach", async () => {
+    const ctx = makeCtx(config);
+    ctx.context = { ...ctx.context, remoteRunReattach: { externalRunId: "run-gone", sourceRunId: "pc-run-0" } };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "not found" }), { status: 404 })));
+
+    const result = await execute(ctx);
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("hermes_gateway_reattach_not_found");
+    expect(result.executionRecovery).toBeUndefined();
+  });
+
+  it("leaves the Hermes run going when Paperclip shuts down", async () => {
+    const controller = new AbortController();
+    const ctx = { ...makeCtx(config), signal: controller.signal };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-hermes-1" }), { status: 200 });
+      if (url.endsWith("/events")) {
+        setTimeout(() => controller.abort(serverShutdownAbortReason("Interrupted by graceful server shutdown (SIGTERM)")), 20);
+        return new Response(hangingStream(init?.signal), { status: 200 });
+      }
+      return new Response(JSON.stringify({ status: "running" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(ctx);
+    expect(result.errorCode).toBe("hermes_gateway_detached");
+    expect(result.executionRecovery).toEqual({ kind: "remote_detached", externalRunId: "run-hermes-1", providerWorkStarted: true });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
+  });
+
+  it("stops the Hermes run on an operator Stop and proves it stopped", async () => {
+    const controller = new AbortController();
+    const ctx = { ...makeCtx(config), signal: controller.signal };
+    let stopped = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-hermes-1" }), { status: 200 });
+      if (url.endsWith("/events")) {
+        setTimeout(() => controller.abort(new Error("Cancelled by board")), 20);
+        return new Response(hangingStream(init?.signal), { status: 200 });
+      }
+      if (url.endsWith("/stop")) {
+        stopped = true;
+        return new Response(JSON.stringify({ status: "stopping" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ status: stopped ? "cancelled" : "running" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(ctx);
+    expect(stopped).toBe(true);
+    expect(result.errorCode).toBe("hermes_gateway_cancelled");
+    expect(result.executionRecovery).toEqual({
+      kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled",
+    });
+  });
+
+  it("resumes a dropped event stream after the last seen event instead of replaying it", async () => {
+    const ctx = makeCtx(config);
+    const eventRequests: Array<string | null> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-hermes-1" }), { status: 200 });
+      if (url.endsWith("/events")) {
+        const headers = new Headers(init?.headers);
+        eventRequests.push(headers.get("Last-Event-ID"));
+        const frames = (seqs: Array<[number, string]>) => seqs.flatMap(([seq, delta]) =>
+          ["event: message.delta", `data: ${JSON.stringify({ event: "message.delta", delta, seq })}`, ""]);
+        if (eventRequests.length === 1) {
+          // First connection drops after two deltas.
+          return new Response(sseStream(frames([[0, "Hello"], [1, " there"]]).join("\n")), { status: 200 });
+        }
+        // Hermes replays the full backlog when the client sends no position.
+        return new Response(sseStream([
+          ...frames([[0, "Hello"], [1, " there"], [2, "!"]]),
+          "event: run.completed", `data: ${JSON.stringify({ event: "run.completed", status: "completed", output: "Hello there!", seq: 3 })}`, "",
+        ].join("\n")), { status: 200 });
+      }
+      return new Response(JSON.stringify({ status: "running" }), { status: 200 });
+    }));
+
+    const result = await execute({ ...ctx, config: { ...config, eventReconnectMs: 250 } });
+    const stdout = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([stream]) => stream === "stdout").map(([, chunk]) => String(chunk)).join("");
+    const deltas = stdout.split("\n").flatMap((line) => parseHermesGatewayStdoutLine(line, "2026-10-05T00:00:00Z"))
+      .flatMap((entry) => entry.kind === "assistant" ? [entry.text] : []);
+
+    expect(result.exitCode).toBe(0);
+    expect(eventRequests).toEqual([null, "1"]);
+    expect(deltas).toEqual(["Hello", " there", "!"]);
   });
 });

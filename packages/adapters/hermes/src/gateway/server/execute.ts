@@ -4,6 +4,7 @@ import type {
   UsageSummary,
 } from "@paperclipai/adapter-utils";
 import type { ConnectionFailure } from "@paperclipai/adapter-utils/connection-failure";
+import { isServerShutdownAbort, readRemoteRunReattachContext } from "@paperclipai/adapter-utils/remote-run-reattach";
 import {
   asNumber,
   asString,
@@ -58,6 +59,8 @@ type ExecutionState = {
   /** Open tool calls per tool name, oldest first (Hermes tool events carry no call id). */
   openToolCalls: Map<string, string[]>;
   toolCallCount: number;
+  /** Highest Hermes event seq handled; resumes the stream and drops replays. */
+  lastSeq: number | null;
   terminal: TerminalState | null;
   resolveTerminal: (state: TerminalState) => void;
   terminalPromise: Promise<TerminalState>;
@@ -529,6 +532,7 @@ function createExecutionState(runId: string): ExecutionState {
     lastEventName: null,
     openToolCalls: new Map(),
     toolCallCount: 0,
+    lastSeq: null,
     terminal: null,
     resolveTerminal,
     terminalPromise,
@@ -600,6 +604,12 @@ async function handleEvent(
   redactText: TextRedactor = sanitizeSensitiveText,
 ): Promise<void> {
   const rawParsed = parseJsonData(frame.data);
+  const seq = asRecord(rawParsed)?.seq;
+  if (typeof seq === "number" && Number.isInteger(seq)) {
+    // A reconnect may replay events this run already logged.
+    if (state.lastSeq !== null && seq <= state.lastSeq) return;
+    state.lastSeq = seq;
+  }
   const eventName = eventNameFromData(rawParsed, frame.event);
   const parsed = annotateToolEvent(state, eventName, rawParsed);
   const record = asRecord(parsed);
@@ -693,7 +703,9 @@ async function consumeEvents(input: {
     try {
       const response = await fetch(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.state.runId)}/events`), {
         method: "GET",
-        headers: input.headers,
+        headers: input.state.lastSeq === null
+          ? input.headers
+          : { ...input.headers, "Last-Event-ID": String(input.state.lastSeq) },
         signal: input.signal,
       });
       if (!response.ok) {
@@ -1012,48 +1024,93 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const body = buildRunBody(ctx, sessionKey);
   const createRunUrl = apiUrl(baseUrl, "/v1/runs");
 
+  const reattach = readRemoteRunReattachContext(ctx.context);
   await ctx.onMeta?.({
     adapterType: ADAPTER_TYPE,
-    command: "POST /v1/runs",
-    commandArgs: [createRunUrl],
+    command: reattach ? "GET /v1/runs/{id}/events" : "POST /v1/runs",
+    commandArgs: [reattach ? apiUrl(baseUrl, `/v1/runs/${encodeURIComponent(reattach.externalRunId)}/events`) : createRunUrl],
     context: {
       runId: ctx.runId,
       timeoutSec,
       eventReconnectMs: reconnectMs,
       sessionKeyStrategy: strategy,
       hasSessionKey: Boolean(sessionKey),
+      ...(reattach ? { reattachHermesRunId: reattach.externalRunId, reattachSourceRunId: reattach.sourceRunId } : {}),
     },
   });
-  await ctx.onLog("stdout", `[hermes-gateway] creating run at ${createRunUrl} (timeout=${timeoutSec}s, session=${strategy})\n`);
-  await ctx.onLog("stdout", `[hermes-gateway] request headers (redacted): ${stringifyForLog(redactForLog(runHeaders, [], 0, redactText), 3_000)}\n`);
 
-  let runId: string | null = null;
-  try {
-    // This adapter has no local child process, so crossing into the first
-    // remote create request is its dispatch boundary. Report it before the
-    // request can block so continuation gates may release their issue lock.
-    ctx.onDispatch?.();
-    const created = await fetchJson(createRunUrl, {
-      method: "POST",
-      headers: runHeaders,
-      body: JSON.stringify(body),
-    });
-    runId = extractRunId(created);
-    if (!runId) {
-      return {
-        exitCode: 1,
-        signal: null,
-        timedOut: false,
-        errorCode: "hermes_gateway_protocol_error",
-        errorMessage: "Hermes /v1/runs response did not include run_id.",
-        errorMeta: { response: redactForLog(created, [], 0, redactText) as Record<string, unknown> },
-      };
-    }
-  } catch (err) {
-    return errorResult(err, baseUrl, redactText);
+  // Opt in to the host's Stop before any provider work, so an operator Stop
+  // reaches the Hermes run instead of waiting for it to finish.
+  await ctx.onCancellationReady?.();
+  if (ctx.signal?.aborted) {
+    return {
+      exitCode: 1,
+      signal: "SIGTERM",
+      timedOut: false,
+      errorCode: "hermes_gateway_cancelled",
+      errorMessage: "Run stopped before the Hermes run was created.",
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    };
   }
 
-  await ctx.onLog("stdout", `[hermes-gateway] run created: ${runId}\n`);
+  let runId: string | null = null;
+  if (reattach) {
+    // A successor of a run Paperclip lost (server shutdown or crash) follows
+    // the Hermes run that is still going instead of starting new work.
+    await ctx.onLog(
+      "stdout",
+      `[hermes-gateway] reattaching to Hermes run ${reattach.externalRunId} (Paperclip lost run ${reattach.sourceRunId})\n`,
+    );
+    try {
+      ctx.onDispatch?.();
+      await fetchJson(apiUrl(baseUrl, `/v1/runs/${encodeURIComponent(reattach.externalRunId)}`), {
+        method: "GET",
+        headers: eventHeaders,
+      });
+    } catch (err) {
+      const status = (err as HermesHttpError).status;
+      return {
+        ...errorResult(err, baseUrl, redactText),
+        ...(status === 404 ? {
+          errorCode: "hermes_gateway_reattach_not_found",
+          errorMessage: `Hermes no longer knows run ${reattach.externalRunId}; it cannot be reattached. Check the issue for what the agent finished before the gateway lost it.`,
+        } : {}),
+      };
+    }
+    runId = reattach.externalRunId;
+    await ctx.onExternalRun?.({ externalRunId: runId });
+  } else {
+    await ctx.onLog("stdout", `[hermes-gateway] creating run at ${createRunUrl} (timeout=${timeoutSec}s, session=${strategy})\n`);
+    await ctx.onLog("stdout", `[hermes-gateway] request headers (redacted): ${stringifyForLog(redactForLog(runHeaders, [], 0, redactText), 3_000)}\n`);
+    try {
+      // This adapter has no local child process, so crossing into the first
+      // remote create request is its dispatch boundary. Report it before the
+      // request can block so continuation gates may release their issue lock.
+      ctx.onDispatch?.();
+      const created = await fetchJson(createRunUrl, {
+        method: "POST",
+        headers: runHeaders,
+        body: JSON.stringify(body),
+      });
+      runId = extractRunId(created);
+      if (!runId) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorCode: "hermes_gateway_protocol_error",
+          errorMessage: "Hermes /v1/runs response did not include run_id.",
+          errorMeta: { response: redactForLog(created, [], 0, redactText) as Record<string, unknown> },
+        };
+      }
+    } catch (err) {
+      return errorResult(err, baseUrl, redactText);
+    }
+    // Record the Hermes run before anything else can fail, so recovery can
+    // find it again if Paperclip stops while it runs.
+    await ctx.onExternalRun?.({ externalRunId: runId });
+    await ctx.onLog("stdout", `[hermes-gateway] run created: ${runId}\n`);
+  }
 
   const state = createExecutionState(runId);
   const controller = new AbortController();
@@ -1082,9 +1139,61 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     timeoutTimer = setTimeout(() => resolve("timeout"), timeoutMs);
   });
 
-  const outcome = await Promise.race([state.terminalPromise, timeoutPromise]);
+  const abortPromise = new Promise<"aborted">((resolve) => {
+    if (!ctx.signal) return;
+    if (ctx.signal.aborted) resolve("aborted");
+    else ctx.signal.addEventListener("abort", () => resolve("aborted"), { once: true });
+  });
+
+  const outcome = await Promise.race([state.terminalPromise, timeoutPromise, abortPromise]);
   if (timeoutTimer) clearTimeout(timeoutTimer);
   controller.abort();
+
+  if (outcome === "aborted") {
+    if (isServerShutdownAbort(ctx.signal?.reason)) {
+      // Paperclip is going away, not the work: leave the Hermes run going so
+      // the next server can reattach to it instead of replaying the task.
+      await ctx.onLog("stdout", `[hermes-gateway] Paperclip is shutting down; leaving Hermes run ${runId} running for reattach\n`);
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: "hermes_gateway_detached",
+        errorMessage: `Paperclip shut down while Hermes run ${runId} was still working; it was left running for reattach.`,
+        provider: "hermes_gateway",
+        executionRecovery: { kind: "remote_detached", externalRunId: runId, providerWorkStarted: true },
+        resultJson: { run_id: runId, status: "detached", last_event: state.lastEventName },
+        sessionParams: { hermesRunId: runId, strategy },
+        sessionDisplayId: sessionKey ? redactText(sessionKey) : null,
+      };
+    }
+    await stopRun({ ctx, baseUrl, headers: eventHeaders, runId, redactText });
+    const finalStatus = await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS });
+    const stopped = extractStatus(finalStatus);
+    const providerStopped = stopped !== null && TERMINAL_STATUSES.has(stopped);
+    return {
+      exitCode: 1,
+      signal: "SIGTERM",
+      timedOut: false,
+      errorCode: "hermes_gateway_cancelled",
+      errorMessage: providerStopped
+        ? `Hermes run ${runId} stopped (${stopped}).`
+        : `Stop was sent to Hermes run ${runId}, but Hermes did not confirm it within ${STOP_GRACE_MS / 1000}s.`,
+      provider: "hermes_gateway",
+      // Only a confirmed terminal status proves the provider stopped.
+      ...(providerStopped ? {
+        executionRecovery: { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" } as const,
+      } : {}),
+      resultJson: {
+        run_id: runId,
+        status: stopped ?? "stop_unconfirmed",
+        last_event: state.lastEventName,
+        final_status: redactForLog(finalStatus, [], 0, redactText),
+      },
+      sessionParams: { hermesRunId: runId, strategy },
+      sessionDisplayId: sessionKey ? redactText(sessionKey) : null,
+    };
+  }
 
   if (outcome === "timeout") {
     await stopRun({ ctx, baseUrl, headers: eventHeaders, runId, redactText });
