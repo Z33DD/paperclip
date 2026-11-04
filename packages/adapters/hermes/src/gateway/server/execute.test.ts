@@ -112,7 +112,61 @@ describe("execute", () => {
       .toEqual(deltas);
     expect(transcript.some((entry) => entry.kind === "stdout" || entry.kind === "stderr")).toBe(false);
     expect(result.resultJson?.output).toBe(deltas.join(""));
-    expect(transcript).toContainEqual(expect.objectContaining({ kind: "system", text: "Hermes event: run.completed" }));
+    expect(transcript).toContainEqual(expect.objectContaining({ kind: "system", text: "Hermes run completed" }));
+  });
+
+  it("pairs Hermes tool events so each call renders with its own result", async () => {
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key", timeoutSec: 5 });
+    const events: Array<[string, Record<string, unknown>]> = [
+      ["tool.started", { tool: "terminal", preview: "ls -la" }],
+      ["tool.started", { tool: "read_file", preview: "notes.md" }],
+      ["tool.completed", { tool: "terminal", duration: 0.2, error: false, preview: "total 8" }],
+      ["tool.started", { tool: "terminal", preview: "wc -l notes.md" }],
+      ["tool.completed", { tool: "read_file", duration: 0.1, error: false, preview: "# Notes" }],
+      ["tool.completed", { tool: "terminal", duration: 0.1, error: true, preview: "No such file" }],
+      ["run.completed", {
+        status: "completed", output: "done",
+        usage: { input_tokens: 12_000, output_tokens: 300, cache_read_tokens: 10_000 },
+        runtime: { model: "deepseek-v4.1-flash" },
+      }],
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
+      }
+      if (url.endsWith("/events")) {
+        return new Response(sseStream(events.flatMap(([event, data]) =>
+          [`event: ${event}`, `data: ${JSON.stringify({ event, ...data })}`, ""]).join("\n")),
+        { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
+      return new Response(JSON.stringify({ status: "completed" }), { status: 200 });
+    }));
+
+    const result = await execute(ctx);
+    const stdout = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([stream]) => stream === "stdout")
+      .map(([, chunk]) => String(chunk)).join("");
+    const transcript = stdout.split("\n").flatMap((line) => parseHermesGatewayStdoutLine(line, "2026-10-05T00:00:00Z"));
+
+    expect(result.exitCode).toBe(0);
+    const calls = transcript.flatMap((entry) => entry.kind === "tool_call" ? [entry] : []);
+    const results = transcript.flatMap((entry) => entry.kind === "tool_result" ? [entry] : []);
+    expect(calls.map((call) => [call.name, call.input])).toEqual([
+      ["terminal", { preview: "ls -la" }],
+      ["read_file", { preview: "notes.md" }],
+      ["terminal", { preview: "wc -l notes.md" }],
+    ]);
+    expect(new Set(calls.map((call) => call.toolUseId)).size).toBe(3);
+    const resultFor = (id: string | undefined) => results.find((entry) => entry.toolUseId === id);
+    expect(resultFor(calls[0]?.toolUseId)).toMatchObject({ toolName: "terminal", content: "total 8", isError: false });
+    expect(resultFor(calls[1]?.toolUseId)).toMatchObject({ toolName: "read_file", content: "# Notes", isError: false });
+    expect(resultFor(calls[2]?.toolUseId)).toMatchObject({ toolName: "terminal", content: "No such file", isError: true });
+    expect(transcript).toContainEqual(expect.objectContaining({
+      kind: "system",
+      text: "Hermes run completed · deepseek-v4.1-flash · 12.0k in (10.0k cached) / 300 out",
+    }));
+    expect(transcript.some((entry) => entry.kind === "system" && entry.text.startsWith("Hermes event: tool"))).toBe(false);
   });
 
   it("rejects remote plain HTTP unless the unsafe dev escape hatch is enabled", async () => {
