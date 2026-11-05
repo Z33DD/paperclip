@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { PaperclipApiClient } from "./client.js";
 import { readConfigFromEnv, type PaperclipMcpConfig } from "./config.js";
+import { readRunMeta } from "./run-meta.js";
 import { createToolDefinitions } from "./tools.js";
 
 // Every tool also takes the caller's run id, for servers that outlive one heartbeat (an agent
@@ -11,7 +12,7 @@ const PAPERCLIP_RUN_ID_ARG = z
   .string()
   .optional()
   .describe(
-    "Your current Paperclip run id (the Run ID in your wake prompt). Needed on writes when this server was started without PAPERCLIP_RUN_ID.",
+    "Your current Paperclip run id (the Run ID in your wake prompt). Needed on writes only when this server was started without PAPERCLIP_RUN_ID and your runtime does not send your run to Paperclip itself.",
   );
 
 export function createPaperclipMcpServer(config: PaperclipMcpConfig = readConfigFromEnv()) {
@@ -24,8 +25,10 @@ export function createPaperclipMcpServer(config: PaperclipMcpConfig = readConfig
   const tools = createToolDefinitions(client);
   for (const tool of tools) {
     const shape = { ...tool.schema.shape, paperclipRunId: PAPERCLIP_RUN_ID_ARG };
-    server.tool(tool.name, tool.description, shape, ({ paperclipRunId, ...input }) =>
-      client.withRunId(paperclipRunId, () => tool.execute(input)),
+    server.tool(tool.name, tool.description, shape, ({ paperclipRunId, ...input }, extra) =>
+      client.withCallContext(readRunMeta(extra?._meta) ?? {}, () =>
+        client.withRunId(paperclipRunId, () => tool.execute(input)),
+      ),
     );
   }
 

@@ -1,6 +1,7 @@
 export interface PaperclipMcpConfig {
   apiUrl: string;
-  apiKey: string;
+  /** Null when the host sends a run token with each tool call instead (see run-meta.ts). */
+  apiKey: string | null;
   companyId: string | null;
   agentId: string | null;
   runId: string | null;
@@ -24,10 +25,8 @@ export function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Papercl
   if (!apiUrl) {
     throw new Error("Missing PAPERCLIP_API_URL");
   }
+  // Optional: a long-lived server whose host sends a run token with each tool call needs none.
   const apiKey = nonEmpty(env.PAPERCLIP_API_KEY);
-  if (!apiKey) {
-    throw new Error("Missing PAPERCLIP_API_KEY");
-  }
 
   return {
     apiUrl: normalizeApiUrl(apiUrl),
