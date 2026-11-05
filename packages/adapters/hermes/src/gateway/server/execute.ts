@@ -787,6 +787,24 @@ function extractErrorMessage(value: unknown): string | null {
   return nonEmpty(record?.error) ?? nonEmpty(record?.message) ?? nonEmpty(record?.detail) ?? extractOutput(value);
 }
 
+const ITERATION_LIMIT_EXIT = /^max_iterations_reached\((\d+)\/(\d+)\)/;
+
+// Hermes reports a turn that ended before finishing (iteration budget, compression, empty replies) as `failed`
+// with no `error`, only `turn_exit_reason`. Without this the run's own reply became the error message.
+function unfinishedTurnFailure(payload: Record<string, unknown>): { errorCode: string; errorMessage: string } | null {
+  const reason = nonEmpty(payload.turn_exit_reason);
+  if (!reason) return null;
+  const limit = ITERATION_LIMIT_EXIT.exec(reason);
+  if (limit) {
+    return {
+      errorCode: "hermes_gateway_iteration_limit",
+      errorMessage: `Hermes stopped this run at its step limit (${limit[1]}/${limit[2]} model calls, the profile's agent.max_turns). `
+        + "The reply is the summary Hermes asked for after the limit, so the work may be done: check the issue.",
+    };
+  }
+  return { errorCode: "hermes_gateway_run_failed", errorMessage: `Hermes ended the turn before finishing: ${reason}.` };
+}
+
 function terminalResultCode(status: string): { exitCode: number; signal: string | null; errorCode: string | null } {
   if (status === "completed") return { exitCode: 0, signal: null, errorCode: null };
   if (FAILURE_STATUSES.has(status)) return { exitCode: 1, signal: null, errorCode: "hermes_gateway_run_failed" };
@@ -809,10 +827,13 @@ export function mapFinalResultForTest(input: {
   const sessionId = extractSessionId(payload) ?? input.sessionKey;
   const sessionDisplayId = sessionId ? redactText(sessionId) : null;
   const mapped = terminalResultCode(input.terminal.status);
+  const explicitError = nonEmpty(payload.error) ?? nonEmpty(payload.message) ?? nonEmpty(payload.detail);
+  const unfinished = mapped.errorCode === "hermes_gateway_run_failed" && !explicitError ? unfinishedTurnFailure(payload) : null;
+  if (unfinished) mapped.errorCode = unfinished.errorCode;
   const usage = parseUsage(payload);
   const costUsd = parseCostUsd(payload);
   const errorMessage = mapped.errorCode
-    ? redactText(extractErrorMessage(payload) ?? `Hermes run ${input.terminal.status}`)
+    ? redactText(unfinished?.errorMessage ?? extractErrorMessage(payload) ?? `Hermes run ${input.terminal.status}`)
     : null;
   return {
     exitCode: mapped.exitCode,
