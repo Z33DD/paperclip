@@ -407,11 +407,39 @@ function buildRunBody(ctx: AdapterExecutionContext, sessionKey: string | null): 
     nonEmpty(ctx.config.instructions) ??
     nonEmpty(payloadTemplate.instructions) ??
     "Follow the Paperclip wake instructions exactly. Do not expose secrets in logs, comments, or final output.";
+  const mcpMeta = buildPaperclipMcpMeta(ctx);
   return {
     ...payloadTemplate,
     input,
     instructions,
     ...(sessionKey ? { session_id: sessionKey } : {}),
+    ...(mcpMeta ? { mcp_meta: mcpMeta } : {}),
+  };
+}
+
+/** The `_meta` key the Paperclip MCP server reads a tool call's run identity from. */
+export const PAPERCLIP_RUN_META_KEY = "paperclip.ai/run";
+const DEFAULT_PAPERCLIP_MCP_SERVER = "paperclip";
+
+/**
+ * Hermes keeps one MCP server per profile for every run, so the run's identity cannot be in that
+ * server's environment. With `mcp_meta`, Hermes attaches it to each of this run's tool calls to
+ * the named server (MCP request `_meta`), outside the model's arguments and the transcript.
+ * `paperclipMcpServer` in the config names that server; `false` sends nothing.
+ */
+function buildPaperclipMcpMeta(ctx: AdapterExecutionContext): Record<string, unknown> | null {
+  const token = nonEmpty(ctx.authToken);
+  if (!token || ctx.config.paperclipMcpServer === false) return null;
+  const server = nonEmpty(ctx.config.paperclipMcpServer) ?? DEFAULT_PAPERCLIP_MCP_SERVER;
+  return {
+    [server]: {
+      [PAPERCLIP_RUN_META_KEY]: {
+        token,
+        runId: ctx.runId,
+        agentId: ctx.agent.id,
+        companyId: ctx.agent.companyId,
+      },
+    },
   };
 }
 

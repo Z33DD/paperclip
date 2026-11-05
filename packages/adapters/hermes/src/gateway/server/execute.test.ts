@@ -1261,6 +1261,46 @@ describe("execute — remote run ownership", () => {
     expect(onExternalRun).toHaveBeenCalledWith({ externalRunId: "run-hermes-1" });
   });
 
+  async function createdRunBody(ctx: AdapterExecutionContext): Promise<Record<string, unknown>> {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        body = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ run_id: "run-hermes-1" }), { status: 200 });
+      }
+      if (url.endsWith("/events")) return new Response(completedStream("done"), { status: 200 });
+      return new Response(JSON.stringify({ status: "completed" }), { status: 200 });
+    }));
+    expect((await execute(ctx)).exitCode).toBe(0);
+    return body;
+  }
+
+  it("hands the run's Paperclip token to the paperclip MCP server through mcp_meta", async () => {
+    const ctx = makeCtx(config);
+    ctx.authToken = "run-jwt";
+    const body = await createdRunBody(ctx);
+    expect(body.mcp_meta).toEqual({
+      paperclip: { "paperclip.ai/run": { token: "run-jwt", runId: "pc-run-1", agentId: "agent-1", companyId: "company-1" } },
+    });
+    expect(String(body.input)).not.toContain("run-jwt");
+    expect(String(body.instructions)).not.toContain("run-jwt");
+    const logged = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls.map(([, chunk]) => String(chunk)).join("");
+    expect(logged).not.toContain("run-jwt");
+  });
+
+  it("names another MCP server, or sends none, as configured", async () => {
+    const named = makeCtx({ ...config, paperclipMcpServer: "board" });
+    named.authToken = "run-jwt";
+    expect(Object.keys((await createdRunBody(named)).mcp_meta as object)).toEqual(["board"]);
+
+    const off = makeCtx({ ...config, paperclipMcpServer: false });
+    off.authToken = "run-jwt";
+    expect(await createdRunBody(off)).not.toHaveProperty("mcp_meta");
+
+    expect(await createdRunBody(makeCtx(config))).not.toHaveProperty("mcp_meta");
+  });
+
   it("reattaches to the named Hermes run without creating a new one", async () => {
     const ctx = makeCtx(config);
     ctx.context = { ...ctx.context, remoteRunReattach: { externalRunId: "run-hermes-1", sourceRunId: "pc-run-0" } };

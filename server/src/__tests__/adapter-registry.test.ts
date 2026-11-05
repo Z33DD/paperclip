@@ -144,6 +144,8 @@ describe("server adapter registry", () => {
 
     expect(builtInGateway).not.toBeNull();
     expect(builtInGateway?.supportsLocalAgentJwt).toBe(false);
+    // A run token for Hermes' Paperclip MCP server, without the local-adapter meaning.
+    expect(builtInGateway?.supportsRunAuthToken).toBe(true);
     expect(builtInGateway?.supportsInstructionsBundle).toBe(false);
     expect(builtInGateway?.requiresMaterializedRuntimeSkills).toBe(false);
     expect(builtInGateway?.getConfigSchema).toBeTypeOf("function");

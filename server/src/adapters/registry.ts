@@ -948,6 +948,8 @@ const hermesGatewayAdapter: ServerAdapterModule = {
   ...createHermesGatewayServerAdapter(),
   runtimeToolDelivery: "invocation_context",
   supportsRemoteRunReattach: true,
+  // The run's agent JWT rides to Hermes in `mcp_meta`, so its Paperclip MCP server needs no key.
+  supportsRunAuthToken: true,
 };
 
 const hermesLocalAdapter: ServerAdapterModule = {
