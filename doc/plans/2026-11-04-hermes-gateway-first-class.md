@@ -13,9 +13,8 @@ SSE) hits the same walls on day one:
    calls looks frozen. Releases up to 2026.1023.0 also wrote each delta without a newline,
    which glued the next event line onto it, so the page showed only the first word of
    the reply (upstream fixed that one in #15201).
-2. **You can't pick it in the UI.** `hermes_gateway` is `hideFromVisualSelection`, and the
-   onboarding wizard only offers `claude_local` / `codex_local`. Gateway agents have to be
-   created through the API with a board token.
+2. **Hard to set up from the UI.** The onboarding wizard only offers `claude_local` / `codex_local`,
+   and a gateway agent made from **New agent** timed out after 10 minutes.
 3. **A Paperclip restart kills live runs.** The run keeps going on the Hermes side, but
    Paperclip marks it `process_lost` because only Paperclip Runner runs can reattach. Then
    recovery re-wakes the agent and starts a duplicate.
@@ -41,15 +40,19 @@ SSE) hits the same walls on day one:
   may be done (the reply is Hermes' forced summary); any other reason is named, instead of the reply
   being shown as the error.
 
-## Phase 2: create and configure in the UI
+## Phase 2: create and configure in the UI (done, smaller than planned)
 
-- Show `hermes_gateway` in the new-agent picker, under the Hermes card ("Local CLI" or
-  "Gateway URL").
-- Onboarding wizard: a "Connect a Hermes gateway" source: base URL, API key (stored as a
-  secret), profile path (`/p/<profile>`), plus a connection test (`testEnvironment`
-  already exists).
-- `KNOWN_DEFAULTS` capability entries for both Hermes adapters, so the first render
-  doesn't fall back to all-false.
+Upstream had already done most of it (#13011): **New agent** offers a Hermes Gateway card, asks for the API
+base URL and the API key (saved as an organization secret), and runs the adapter's environment test before
+creating the agent. The agent page edits every gateway field. What was left:
+
+- The gateway's default timeout was 600 s, so an agent created from the UI cut off ordinary Hermes turns
+  (a 31-lead batch took 16.5 minutes). It is now 1800 s, the same as `hermes_local`.
+- `KNOWN_DEFAULTS` entries for both Hermes adapters, matching the server's capabilities.
+- The URL field explains `/p/<profile>` for one gateway that serves several Hermes profiles.
+
+Not done: a Hermes source in the first-run onboarding wizard. Upstream deliberately limited that wizard to
+Claude and Codex (#18309); a Hermes company adds its agents from **New agent** after onboarding.
 
 ## Phase 3: survive Paperclip restarts (done)
 

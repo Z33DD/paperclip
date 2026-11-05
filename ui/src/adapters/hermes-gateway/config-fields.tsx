@@ -14,7 +14,7 @@ const inputClass =
   "w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40";
 
 const DEFAULT_SESSION_KEY_STRATEGY = "issue";
-const DEFAULT_TIMEOUT_SEC = 600;
+const DEFAULT_TIMEOUT_SEC = 1800;
 const DEFAULT_EVENT_RECONNECT_MS = 2000;
 
 type SecretRef = {
