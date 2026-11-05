@@ -1195,6 +1195,34 @@ describe("mapFinalResultForTest", () => {
     expect(result.errorCode).toBe("hermes_gateway_run_failed");
     expect(result.errorMessage).toBe("boom");
   });
+
+  it("reports a run stopped at the iteration limit as its own error, not as the reply", () => {
+    const result = mapFinalResultForTest({
+      terminal: {
+        runId: "run-1",
+        status: "failed",
+        payload: { status: "failed", completed: false, partial: false, turn_exit_reason: "max_iterations_reached(80/80)", output: "Feito. A COL-17 está fechada." },
+      },
+      outputChunks: [],
+      sessionKey: "session-key",
+      strategy: "issue",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("hermes_gateway_iteration_limit");
+    expect(result.errorMessage).toContain("step limit (80/80");
+    expect(result.summary).toBe("Feito. A COL-17 está fechada.");
+  });
+
+  it("names any other unfinished-turn reason instead of echoing the reply", () => {
+    const result = mapFinalResultForTest({
+      terminal: { runId: "run-1", status: "failed", payload: { status: "failed", turn_exit_reason: "empty_response_exhausted", output: "partial text" } },
+      outputChunks: [],
+      sessionKey: "session-key",
+      strategy: "issue",
+    });
+    expect(result.errorCode).toBe("hermes_gateway_run_failed");
+    expect(result.errorMessage).toBe("Hermes ended the turn before finishing: empty_response_exhausted.");
+  });
 });
 
 describe("execute — remote run ownership", () => {
