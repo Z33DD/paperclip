@@ -1044,7 +1044,7 @@ function Setup({
                           </div>
                         )}
                         {adapterType === "hermes_gateway" && (
-                          <Field label="Hermes API base URL">
+                          <Field label="Hermes API base URL" hint="The Hermes API server. If one gateway serves several Hermes profiles, end the URL with /p/<profile>.">
                             <Input
                               aria-label="Hermes API base URL"
                               value={gatewayUrl}
@@ -1052,7 +1052,7 @@ function Setup({
                                 setGatewayUrl(event.target.value);
                                 resetTest();
                               }}
-                              placeholder="https://hermes.example.com"
+                              placeholder="http://127.0.0.1:8642"
                             />
                           </Field>
                         )}
