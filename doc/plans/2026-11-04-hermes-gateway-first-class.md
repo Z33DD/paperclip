@@ -89,11 +89,34 @@ the work unseen.
     from any other successor.
   - A run with no recorded external id is held as before.
 
-## Phase 4: Paperclip tools without operator wiring
+## Phase 4: Paperclip tools without operator wiring (in progress)
 
-- Send the run id and a run-scoped key with each run (the request body's `metadata`, or a
-  header the Hermes Paperclip toolset reads), so Hermes' Paperclip MCP calls carry them
-  per call. Coordinate with #16636 instead of duplicating it.
+Today a Hermes company needs three things per agent before its agents can write to the board: a
+long-lived Paperclip API key in the agent's environment, the Paperclip MCP server patched to take the run
+id per call (#16636 is the upstream version), and an instruction telling the model to copy the Run ID
+from its wake prompt into every write. Paperclip already mints a per-run agent JWT for local adapters,
+and that token carries `run_id` itself; the gap is getting it to the Paperclip tools of a Hermes gateway,
+whose MCP servers are long-lived, per profile, with a fixed environment.
+
+The channel is MCP's own request metadata: `tools/call` takes `_meta`, which reaches the server's tool
+handler and never goes through the model or the transcript.
+
+- **Paperclip server:** `supportsRunAuthToken` on a server adapter mints the run JWT for that adapter,
+  as `supportsLocalAgentJwt` does for local ones, without the local-only meaning the UI gives that flag.
+  `hermes_gateway` sets it.
+- **Gateway adapter:** with a run token, `POST /v1/runs` carries
+  `mcp_meta: { "<server>": { "paperclip.ai/run": { token, runId, agentId, companyId } } }`. The server
+  name is `paperclipMcpServer` in the adapter config (default `paperclip`; `false` turns it off).
+- **Paperclip MCP server:** a tool call whose `_meta` has `paperclip.ai/run` uses that token as its bearer,
+  that run id, and that agent/company as defaults, for that call only (AsyncLocalStorage, like the per-call
+  run id). Started without `PAPERCLIP_API_KEY`, it serves calls that bring their own credentials and
+  refuses the rest with a clear error.
+- **Hermes** (patch, to be offered upstream): `POST /v1/runs` accepts `mcp_meta`, keeps it in memory for
+  that run only (never persisted or logged), and sends each server's entry as `meta` on that run's
+  `tools/call` requests to that server.
+
+With all four, an operator configures the Paperclip MCP server once per Hermes install (command +
+`PAPERCLIP_API_URL`); agents need no key, and the model never handles a run id or a credential.
 
 ## Out of scope
 
