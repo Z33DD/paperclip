@@ -46,6 +46,8 @@ const packages = {
 };
 
 console.log(`building ${ref} @ ${sha.slice(0, 9)} over ${base}`);
+// tsc never deletes output, so files compiled from another branch would ship as "new". Start clean.
+for (const dir of Object.values(packages)) fs.rmSync(path.join(root, dir, "dist"), { recursive: true, force: true });
 run("pnpm", ["--filter", "@paperclipai/shared", "--filter", "@paperclipai/db", "--filter", "@paperclipai/adapter-utils",
   "--filter", "@paperclipai/hermes-paperclip-adapter", "build"]);
 run("pnpm", ["exec", "tsc"], path.join(root, "server"));
