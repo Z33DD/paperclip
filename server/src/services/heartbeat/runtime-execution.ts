@@ -238,7 +238,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       : { kind: "standard" as const };
   const authToken =
     nativeRuntimeResolution.kind === "legacy" &&
-    adapter.supportsLocalAgentJwt
+    (adapter.supportsLocalAgentJwt || adapter.supportsRunAuthToken)
       ? createLocalAgentJwt(
           agent.id,
           agent.companyId,
@@ -250,7 +250,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       : null;
   if (
     nativeRuntimeResolution.kind === "legacy" &&
-    adapter.supportsLocalAgentJwt &&
+    (adapter.supportsLocalAgentJwt || adapter.supportsRunAuthToken) &&
     !authToken
   ) {
     logger.warn(

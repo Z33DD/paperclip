@@ -519,6 +519,12 @@ export interface ServerAdapterModule {
   /** Selected harness can resume its conversation with this run's tool bindings. */
   supportsToolRefreshOnResume?: boolean | ((config: Record<string, unknown>) => boolean);
   supportsLocalAgentJwt?: boolean;
+  /**
+   * Mint the run-scoped agent JWT (`ctx.authToken`) for a remote adapter, which hands it to its
+   * runtime for that run only. Unlike `supportsLocalAgentJwt`, it says nothing about where the
+   * agent runs, so the UI keeps treating the adapter as remote.
+   */
+  supportsRunAuthToken?: boolean;
   /** How this adapter receives Paperclip's run-scoped control tools. */
   runtimeToolDelivery?: AdapterRuntimeToolDelivery;
   /**
