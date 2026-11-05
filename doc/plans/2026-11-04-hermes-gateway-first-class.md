@@ -36,6 +36,10 @@ SSE) hits the same walls on day one:
   - `run.completed` → one line with model and token usage
   - `subagent.start` / `subagent.complete` → readable lines
   - Logs written before pairing still render, with one id per event.
+- A run Hermes stops before finishing comes back `failed` with only `turn_exit_reason`, no `error`.
+  `max_iterations_reached(n/m)` now maps to `hermes_gateway_iteration_limit` with a message that the work
+  may be done (the reply is Hermes' forced summary); any other reason is named, instead of the reply
+  being shown as the error.
 
 ## Phase 2: create and configure in the UI
 
