@@ -104,7 +104,9 @@ const manifest = {
 fs.writeFileSync(path.join(stage, "overlay.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 fs.mkdirSync(outDir, { recursive: true });
 const tarball = path.join(outDir, `paperclip-overlay-${id}.tar.gz`);
-execFileSync("tar", ["-czf", tarball, "-C", stage, "."]);
+// No macOS extended attributes: GNU tar on the box warns about every one.
+execFileSync("tar", [...(process.platform === "darwin" ? ["--no-mac-metadata", "--no-xattrs"] : []), "-czf", tarball, "-C", stage, "."],
+  { env: { ...process.env, COPYFILE_DISABLE: "1" } });
 fs.rmSync(work, { recursive: true, force: true });
 
 console.log(`\n${tarball}`);
