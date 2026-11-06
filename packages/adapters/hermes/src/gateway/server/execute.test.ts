@@ -826,7 +826,28 @@ describe("execute", () => {
     expect(result.timedOut).toBe(true);
     expect(result.errorCode).toBe("hermes_gateway_timeout");
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/stop"))).toBe(true);
+    expect(result.executionRecovery).toEqual({
+      kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled",
+    });
   });
+
+  it("does not claim a stop on timeout when Hermes never confirms it", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-slow", status: "started" }), { status: 200 });
+      if (url.endsWith("/events")) return new Promise<Response>(() => {});
+      return new Response(JSON.stringify({ status: "running" }), { status: 200 });
+    }));
+
+    const result = await execute(makeCtx({
+      apiBaseUrl: "http://127.0.0.1:8642",
+      apiKey: "secret-key",
+      timeoutSec: 0.001,
+    }));
+
+    expect(result.errorCode).toBe("hermes_gateway_timeout");
+    expect(result.executionRecovery).toBeUndefined();
+  }, 30_000);
 });
 
 describe("gateway connection failure reporting", () => {

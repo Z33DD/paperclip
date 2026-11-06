@@ -2085,6 +2085,66 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
   });
 
+  describe("a timed-out run and the issue's next comment", () => {
+    const confirmedStop = { kind: "interrupted", providerStopped: true, sessionPreserved: true, actionOutcomes: "settled" };
+    async function timeOutRun(executionRecovery?: typeof confirmedStop) {
+      const f = await seedRunFixture({ agentStatus: "idle", adapterType: "hermes_gateway", runStatus: "queued" });
+      mockAdapterExecute.mockImplementationOnce(async () => ({
+        exitCode: 1, signal: null, timedOut: true, errorCode: "timeout",
+        errorMessage: "Gateway run timed out after 1800s.", provider: "test", model: "test-model",
+        ...(executionRecovery ? { executionRecovery } : {}),
+      }));
+      const heartbeat = heartbeatService(db);
+      await heartbeat.resumeQueuedRuns();
+      await waitForRunToSettle(heartbeat, f.runId, 5_000);
+      await heartbeat.waitForRunExecutionDrain(f.runId);
+      const { settleUnrecoverableExecutions } = await import("../services/execution-recovery-resolution.js");
+      await settleUnrecoverableExecutions(db);
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId));
+      expect(run.status).toBe("timed_out");
+      const continuations = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, f.runId));
+      // Let automatic recovery finish: a comment during a live run queues behind it by design.
+      await vi.waitFor(async () => {
+        expect(await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.agentId, f.agentId),
+          inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"])))).toEqual([]);
+      }, { timeout: 15_000, interval: 100 });
+      await db.update(issues).set({ status: "todo", checkoutRunId: null, executionRunId: null,
+        executionAgentNameKey: null, executionLockedAt: null }).where(eq(issues.id, f.issueId));
+      const managerId = randomUUID();
+      await db.insert(agents).values({ id: managerId, companyId: f.companyId, name: "Manager", role: "ceo", status: "idle",
+        adapterType: "process", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+      const [comment] = await db.insert(issueComments).values({ companyId: f.companyId, issueId: f.issueId,
+        authorType: "agent", authorAgentId: managerId, body: "Continue with the next block." }).returning();
+      const wake = () => heartbeat.wakeup(f.agentId, {
+        source: "automation", triggerDetail: "system", reason: "issue_commented",
+        payload: { issueId: f.issueId, commentId: comment!.id, mutation: "comment" },
+        requestedByActorType: "agent", requestedByActorId: managerId,
+        contextSnapshot: { issueId: f.issueId, taskId: f.issueId, commentId: comment!.id, wakeCommentId: comment!.id,
+          source: "issue.comment", wakeReason: "issue_commented" },
+      });
+      const wakeStatuses = async () => (await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.agentId, f.agentId))).map(row => row.status);
+      return { ...f, run, continuations, wake, wakeStatuses };
+    }
+
+    it("reaches the agent once the provider confirmed the run stopped", async () => {
+      const f = await timeOutRun(confirmedStop);
+      expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
+      // One bounded automatic continuation, the same as a run that ended on its own.
+      expect(f.continuations.map(run => run.contextSnapshot?.wakeReason)).toEqual(["issue_continuation_needed"]);
+      expect(await f.wake()).not.toBeNull();
+      expect(await f.wakeStatuses()).not.toContain("deferred_issue_execution");
+    });
+
+    it("stays held while the provider may still be running", async () => {
+      const f = await timeOutRun();
+      expect(f.continuations).toEqual([]);
+      expect(await getExecutionBlocker(db, f.companyId, f.issueId)).not.toBeNull();
+      await f.wake();
+      expect(await f.wakeStatuses()).toContain("deferred_issue_execution");
+    });
+  });
+
   it.each([false, true])("waits for a live terminal predecessor before a new turn (historical hold: %s)", async withHold => {
     const child = spawnAliveProcess();
     childProcesses.add(child);

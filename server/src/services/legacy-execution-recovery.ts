@@ -39,6 +39,11 @@ export function legacyExecutionNeedsReconciliation(
       && evidence.providerStopped === true && evidence.sessionPreserved === true
       && evidence.actionOutcomes === "settled"
       && (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state === "acknowledged") return false;
+  // A timed-out turn whose provider confirmed the stop is over and its session
+  // survives, so a new turn cannot overlap it and resumes with the full history.
+  if (run.status === "timed_out" && evidence?.kind === "interrupted"
+      && evidence.providerStopped === true && evidence.sessionPreserved === true
+      && evidence.actionOutcomes === "settled") return false;
   // Waiting for a subscription or workspace precedes provider execution. It is
   // a resource wait, not a failed provider attempt or permission to replay work.
   if (run.status === "cancelled" && (run.errorCode === "ai_connection_busy" || run.errorCode === "ai_connection_pool_exhausted") &&
