@@ -50,7 +50,10 @@ console.log(`building ${ref} @ ${sha.slice(0, 9)} over ${base}`);
 for (const dir of Object.values(packages)) fs.rmSync(path.join(root, dir, "dist"), { recursive: true, force: true });
 run("pnpm", ["--filter", "@paperclipai/shared", "--filter", "@paperclipai/db", "--filter", "@paperclipai/adapter-utils",
   "--filter", "@paperclipai/hermes-paperclip-adapter", "build"]);
-run("pnpm", ["exec", "tsc"], path.join(root, "server"));
+// The server type-check needs more memory than a small builder box's cgroup allows, and CI already
+// runs it, so allow a memory-lean emit pass here (the emitted JS does not depend on type checking).
+const tscFlags = (process.env.PAPERCLIP_OVERLAY_TSC_FLAGS ?? "").split(/\s+/).filter(Boolean);
+run("pnpm", ["exec", "tsc", ...tscFlags], path.join(root, "server"));
 run("pnpm", ["--filter", "@paperclipai/ui", "build"]);
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-overlay-"));
